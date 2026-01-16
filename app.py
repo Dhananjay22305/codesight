@@ -1,13 +1,20 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from openai import OpenAI
+from pathlib import Path
 import os
 import json
 import re
+
+# --------------------
+# Setup
+# --------------------
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
 
 load_dotenv()
 
@@ -22,7 +29,6 @@ client = OpenAI(
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,19 +36,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static and templates
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+# --------------------
+# Serve frontend
+# --------------------
+if not STATIC_DIR.exists():
+    raise RuntimeError(f"static folder not found at: {STATIC_DIR}")
 
-# Home page
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
 @app.get("/")
-async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+def serve_frontend():
+    return FileResponse(STATIC_DIR / "index.html")
 
-
+# --------------------
+# API logic
+# --------------------
 class CodeRequest(BaseModel):
     code: str
-
 
 SYSTEM_PROMPT = """
 You are a senior code reviewer.
@@ -70,7 +80,6 @@ Return ONLY valid JSON in this exact format:
 No markdown. No explanations.
 """
 
-
 @app.post("/analyze")
 async def analyze_code(req: CodeRequest):
 
@@ -89,8 +98,6 @@ async def analyze_code(req: CodeRequest):
         )
 
         raw = response.choices[0].message.content.strip()
-
-        # Clean accidental code fences
         raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
 
         parsed = json.loads(raw)
@@ -103,8 +110,3 @@ async def analyze_code(req: CodeRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
