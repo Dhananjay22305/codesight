@@ -1,5 +1,7 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -20,12 +22,23 @@ client = OpenAI(
 
 app = FastAPI()
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static and templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+# Home page
+@app.get("/")
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
 
 class CodeRequest(BaseModel):
     code: str
@@ -77,7 +90,7 @@ async def analyze_code(req: CodeRequest):
 
         raw = response.choices[0].message.content.strip()
 
-        # Clean accidental fences
+        # Clean accidental code fences
         raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
 
         parsed = json.loads(raw)
