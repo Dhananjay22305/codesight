@@ -17,17 +17,16 @@ import traceback
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
-# Always load .env from the project folder, no matter where you launch from
-load_dotenv(BASE_DIR / ".env")
+# Load local .env file if it exists
+if os.path.exists(".env"):
+    load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    raise RuntimeError("Missing GROQ_API_KEY. Add it to the .env file: GROQ_API_KEY=your_key")
-
-MODEL_NAME = "llama-3.3-70b-versatile"
+    raise RuntimeError("Missing GROQ_API_KEY in environment variables")
 
 client = OpenAI(
-    api_key=GROQ_API_KEY.strip(),
+    api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1"
 )
 
@@ -48,18 +47,15 @@ if not STATIC_DIR.exists():
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-
 @app.get("/")
 def serve_frontend():
     return FileResponse(STATIC_DIR / "index.html")
-
 
 # --------------------
 # API logic
 # --------------------
 class CodeRequest(BaseModel):
     code: str
-
 
 SYSTEM_PROMPT = """
 You are a senior code reviewer.
@@ -71,7 +67,7 @@ Tasks:
    - quality
    - complexity
    - security
-4. Compute overall as the average of the three
+4. Compute overall as average
 
 Return ONLY valid JSON in this exact format:
 {
@@ -84,73 +80,37 @@ Return ONLY valid JSON in this exact format:
   }
 }
 
-The corrected_code value must be a properly escaped JSON string (escape newlines as \\n and quotes as \\").
 No markdown. No explanations.
 """
 
-
-def extract_json(text: str) -> dict:
-    """Pull the JSON object out of the model reply, even if it adds extra text."""
-    text = re.sub(r"```[a-zA-Z]*", "", text).replace("```", "").strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("Model did not return JSON")
-    return json.loads(text[start:end + 1])
-
-
-def clamp(value) -> int:
-    try:
-        return max(0, min(100, int(round(float(value)))))
-    except (TypeError, ValueError):
-        return 0
-
-
-# Plain `def` so FastAPI runs it in a thread and doesn't block the server
 @app.post("/analyze")
-def analyze_code(req: CodeRequest):
+async def analyze_code(req: CodeRequest):
 
     if not req.code.strip():
         raise HTTPException(status_code=400, detail="Code cannot be empty")
 
     try:
         response = client.chat.completions.create(
-            model=MODEL_NAME,
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": req.code}
             ],
             temperature=0.2,
-            max_tokens=4096,
-            response_format={"type": "json_object"}
+            max_tokens=2000
         )
 
-        raw = (response.choices[0].message.content or "").strip()
-        parsed = extract_json(raw)
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
 
-        metrics = parsed.get("metrics", {})
-        quality = clamp(metrics.get("quality"))
-        complexity = clamp(metrics.get("complexity"))
-        security = clamp(metrics.get("security"))
-        overall = round((quality + complexity + security) / 3)
+        parsed = json.loads(raw)
 
         return {
             "success": True,
-            "output": parsed.get("corrected_code", ""),
-            "metrics": {
-                "quality": quality,
-                "complexity": complexity,
-                "security": security,
-                "overall": overall
-            }
+            "output": parsed["corrected_code"],
+            "metrics": parsed["metrics"]
         }
 
-    except json.JSONDecodeError:
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail="AI returned invalid JSON. Try again or use a shorter code snippet."
-        )
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
