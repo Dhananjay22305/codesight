@@ -3,15 +3,44 @@ document.addEventListener("DOMContentLoaded", () => {
     const analyzeBtn = document.getElementById("analyze-btn");
     const userEditor = document.getElementById("user-editor");
     const correctedEditor = document.getElementById("corrected-editor");
+    const inputLines = document.getElementById("line-numbers");
+    const outputLines = document.getElementById("output-lines");
 
     const scoreEl = document.querySelector(".score");
 
-    const qualityVal = document.querySelectorAll(".mc-value")[0];
-    const complexityVal = document.querySelectorAll(".mc-value")[1];
-    const securityVal = document.querySelectorAll(".mc-value")[2];
+    const mcValues = document.querySelectorAll(".mc-value");
+    const qualityVal = mcValues[0];
+    const complexityVal = mcValues[1];
+    const securityVal = mcValues[2];
 
     const fills = document.querySelectorAll(".fill");
 
+    // ---------- Line numbers ----------
+    function updateLineNumbers(text, target) {
+        const count = Math.max(1, text.split("\n").length);
+        let out = "";
+        for (let i = 1; i <= count; i++) {
+            out += i + "\n";
+        }
+        target.textContent = out;
+    }
+
+    userEditor.addEventListener("input", () => {
+        updateLineNumbers(userEditor.value, inputLines);
+    });
+
+    userEditor.addEventListener("scroll", () => {
+        inputLines.scrollTop = userEditor.scrollTop;
+    });
+
+    correctedEditor.addEventListener("scroll", () => {
+        outputLines.scrollTop = correctedEditor.scrollTop;
+    });
+
+    updateLineNumbers("", inputLines);
+    updateLineNumbers("", outputLines);
+
+    // ---------- Analyze ----------
     async function analyzeCode() {
 
         const userCode = userEditor.value.trim();
@@ -23,6 +52,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
         analyzeBtn.disabled = true;
         analyzeBtn.innerText = "ANALYZING...";
+        correctedEditor.textContent = "";
+        updateLineNumbers("", outputLines);
 
         try {
             const response = await fetch("/analyze", {
@@ -33,13 +64,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const data = await response.json();
 
-            if (!data.success) {
-                correctedEditor.innerText = "Backend Error";
+            if (!response.ok || !data.success) {
+                const msg = "Error: " + (data.detail || data.error || "Unknown error");
+                correctedEditor.textContent = msg;
+                updateLineNumbers(msg, outputLines);
                 return;
             }
 
-            // Show corrected code
-            correctedEditor.innerText = data.output;
+            // Corrected code
+            correctedEditor.textContent = data.output;
+            updateLineNumbers(data.output, outputLines);
 
             // Metrics
             const m = data.metrics;
@@ -56,11 +90,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
         } catch (err) {
             console.error(err);
-            correctedEditor.innerText = "Error connecting to backend";
+            correctedEditor.textContent = "Error connecting to backend";
+        } finally {
+            analyzeBtn.disabled = false;
+            analyzeBtn.innerText = "ANALYZE";
         }
-
-        analyzeBtn.disabled = false;
-        analyzeBtn.innerText = "ANALYZE";
     }
 
     analyzeBtn.addEventListener("click", analyzeCode);
