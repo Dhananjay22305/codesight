@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, NotFoundError, BadRequestError
 from pathlib import Path
 import os
 import json
@@ -17,16 +17,18 @@ import traceback
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
-# Load local .env file if it exists
-if os.path.exists(".env"):
-    load_dotenv()
+# Loads .env locally; on Render the real environment variables are used
+load_dotenv(BASE_DIR / ".env")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("Missing GROQ_API_KEY in environment variables")
 
+# Model is configurable (set GROQ_MODEL in .env or on Render)
+MODEL_NAME = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+
 client = OpenAI(
-    api_key=GROQ_API_KEY,
+    api_key=GROQ_API_KEY.strip(),
     base_url="https://api.groq.com/openai/v1"
 )
 
@@ -47,15 +49,18 @@ if not STATIC_DIR.exists():
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+
 @app.get("/")
 def serve_frontend():
     return FileResponse(STATIC_DIR / "index.html")
+
 
 # --------------------
 # API logic
 # --------------------
 class CodeRequest(BaseModel):
     code: str
+
 
 SYSTEM_PROMPT = """
 You are a senior code reviewer.
@@ -67,7 +72,7 @@ Tasks:
    - quality
    - complexity
    - security
-4. Compute overall as average
+4. Compute overall as the average of the three
 
 Return ONLY valid JSON in this exact format:
 {
@@ -80,37 +85,93 @@ Return ONLY valid JSON in this exact format:
   }
 }
 
+The corrected_code value must be a properly escaped JSON string (escape newlines as \\n and quotes as \\").
 No markdown. No explanations.
 """
 
+
+def extract_json(text: str) -> dict:
+    """Pull the JSON object out of the model reply, even if it adds extra text."""
+    text = re.sub(r"```[a-zA-Z]*", "", text).replace("```", "").strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("Model did not return JSON")
+    return json.loads(text[start:end + 1])
+
+
+def clamp(value) -> int:
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def call_model(code: str):
+    """Call Groq. If JSON mode is rejected, retry once without it."""
+    kwargs = dict(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": code}
+        ],
+        temperature=0.2,
+        max_completion_tokens=8000,
+        extra_body={"reasoning_effort": "low"}
+    )
+    try:
+        return client.chat.completions.create(
+            response_format={"type": "json_object"}, **kwargs
+        )
+    except BadRequestError as e:
+        if "model" in str(e).lower() and "decommission" in str(e).lower():
+            raise
+        return client.chat.completions.create(**kwargs)
+
+
+# Plain `def` so FastAPI runs it in a thread and doesn't block the server
 @app.post("/analyze")
-async def analyze_code(req: CodeRequest):
+def analyze_code(req: CodeRequest):
 
     if not req.code.strip():
         raise HTTPException(status_code=400, detail="Code cannot be empty")
 
     try:
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": req.code}
-            ],
-            temperature=0.2,
-            max_tokens=2000
-        )
+        response = call_model(req.code)
 
-        raw = response.choices[0].message.content.strip()
-        raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = extract_json(raw)
 
-        parsed = json.loads(raw)
+        metrics = parsed.get("metrics", {})
+        quality = clamp(metrics.get("quality"))
+        complexity = clamp(metrics.get("complexity"))
+        security = clamp(metrics.get("security"))
+        overall = round((quality + complexity + security) / 3)
 
         return {
             "success": True,
-            "output": parsed["corrected_code"],
-            "metrics": parsed["metrics"]
+            "output": parsed.get("corrected_code", ""),
+            "metrics": {
+                "quality": quality,
+                "complexity": complexity,
+                "security": security,
+                "overall": overall
+            }
         }
 
+    except NotFoundError:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=(f"Model '{MODEL_NAME}' is not available on Groq. "
+                    "Check https://console.groq.com/docs/models and update GROQ_MODEL.")
+        )
+    except (json.JSONDecodeError, ValueError):
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail="AI returned invalid JSON. Try again or use a shorter code snippet."
+        )
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
